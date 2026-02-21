@@ -1784,6 +1784,22 @@
       },
       "type": "array"
     },
+    "notify_next_turn": {
+      "default": null,
+      "description": "Optional external command to decide follow-up turn input.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "notify_next_turn_service": {
+      "default": null,
+      "description": "Optional external command to start a per-session next-turn decision service.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "oss_provider": {
       "description": "Preferred OSS provider for local models, e.g. \"lmstudio\" or \"ollama\".",
       "type": "string"

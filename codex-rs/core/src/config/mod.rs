@@ -242,6 +242,33 @@ pub struct Config {
     /// If unset the feature is disabled.
     pub notify: Option<Vec<String>>,
 
+    /// Optional external command to decide whether Codex should automatically start a
+    /// follow-up turn after an agent-completed turn.
+    ///
+    /// The command receives the same JSON payload as `notify` as its final argv argument.
+    /// If it prints a JSON object to stdout with `need_next_turn=true` and a non-empty
+    /// `next_turn_input`, Codex enqueues that input as a new turn in the same session.
+    ///
+    /// Example stdout:
+    ///
+    /// ```json
+    /// {"need_next_turn": true, "next_turn_input": "Please run tests and summarize failures."}
+    /// ```
+    pub notify_next_turn: Option<Vec<String>>,
+
+    /// Optional external command to start a per-session auto-next-turn decision service.
+    ///
+    /// When set, Codex starts this command when a session starts and terminates it on session
+    /// shutdown. Codex injects session-specific environment variables (host/port/service URL) so
+    /// each session can use an isolated service instance.
+    ///
+    /// Typical usage:
+    ///
+    /// ```toml
+    /// notify_next_turn_service = ["python3", "/path/to/autonext_service.py"]
+    /// ```
+    pub notify_next_turn_service: Option<Vec<String>>,
+
     /// TUI notifications preference. When set, the TUI will send terminal notifications on
     /// approvals and turn completions when not focused.
     pub tui_notifications: Notifications,
@@ -965,6 +992,14 @@ pub struct ConfigToml {
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+
+    /// Optional external command to decide follow-up turn input.
+    #[serde(default)]
+    pub notify_next_turn: Option<Vec<String>>,
+
+    /// Optional external command to start a per-session next-turn decision service.
+    #[serde(default)]
+    pub notify_next_turn_service: Option<Vec<String>>,
 
     /// System instructions.
     pub instructions: Option<String>,
@@ -1957,6 +1992,8 @@ impl Config {
             enforce_residency: enforce_residency.value,
             did_user_set_custom_approval_policy_or_sandbox_mode,
             notify: cfg.notify,
+            notify_next_turn: cfg.notify_next_turn,
+            notify_next_turn_service: cfg.notify_next_turn_service,
             user_instructions,
             base_instructions,
             personality,
@@ -4526,6 +4563,8 @@ model_verbosity = "high"
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 user_instructions: None,
                 notify: None,
+                notify_next_turn: None,
+                notify_next_turn_service: None,
                 cwd: fixture.cwd(),
                 cli_auth_credentials_store_mode: Default::default(),
                 mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4644,6 +4683,8 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            notify_next_turn: None,
+            notify_next_turn_service: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4760,6 +4801,8 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            notify_next_turn: None,
+            notify_next_turn_service: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4862,6 +4905,8 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            notify_next_turn: None,
+            notify_next_turn_service: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),

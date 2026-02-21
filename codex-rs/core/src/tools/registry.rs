@@ -387,6 +387,14 @@ async fn dispatch_after_tool_use_hook(
         let hook_name = hook_outcome.hook_name;
         match hook_outcome.result {
             HookResult::Success => {}
+            HookResult::SuccessWithDirective(_) => {
+                warn!(
+                    call_id = %invocation.call_id,
+                    tool_name = %invocation.tool_name,
+                    hook_name = %hook_name,
+                    "after_tool_use hook returned unsupported directive; ignoring"
+                );
+            }
             HookResult::FailedContinue(error) => {
                 warn!(
                     call_id = %invocation.call_id,

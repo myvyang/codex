@@ -26,6 +26,7 @@ use crate::protocol::EventMsg;
 use crate::protocol::TurnAbortReason;
 use crate::protocol::TurnAbortedEvent;
 use crate::protocol::TurnCompleteEvent;
+use crate::protocol::WarningEvent;
 use crate::session_prefix::TURN_ABORTED_OPEN_TAG;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
@@ -227,6 +228,17 @@ impl Session {
             last_agent_message,
         });
         self.send_event(turn_context.as_ref(), event).await;
+
+        for input in self.drain_auto_next_turn_inputs().await {
+            self.send_event(
+                turn_context.as_ref(),
+                EventMsg::Warning(WarningEvent {
+                    message: "Auto next-turn: injecting follow-up prompt.".to_string(),
+                }),
+            )
+            .await;
+            self.submit_auto_next_user_turn(input).await;
+        }
     }
 
     async fn register_new_active_task(&self, task: RunningTask) {

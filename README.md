@@ -57,4 +57,10 @@ You can also use Codex with an API key, but this requires [additional setup](htt
 - [**Installing & building**](./docs/install.md)
 - [**Open source fund**](./docs/open-source-fund.md)
 
+## Improvements In This Fork
+
+- After a single turn completes, Codex can run an intelligent continuation decision (`notify_next_turn` hook + local decision service).
+- When the turn is judged as safely continuable, Codex automatically injects the next-turn input and keeps working in the same session.
+- This extends closed-loop execution length from one-turn completion to multi-step auto-continuation when a simple and low-risk next step is available.
+
 This repository is licensed under the [Apache-2.0 License](LICENSE).

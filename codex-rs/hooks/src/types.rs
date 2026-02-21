@@ -12,10 +12,23 @@ use serde::Serializer;
 
 pub type HookFn = Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookResult> + Send + Sync>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookDirective {
+    QueueNextTurn {
+        input: String,
+        reason: Option<String>,
+    },
+    Notify {
+        message: String,
+    },
+}
+
 #[derive(Debug)]
 pub enum HookResult {
     /// Success: hook completed successfully.
     Success,
+    /// SuccessWithDirective: hook completed successfully and returned an additional directive.
+    SuccessWithDirective(HookDirective),
     /// FailedContinue: hook failed, but other subsequent hooks should still execute and the
     /// operation should continue.
     FailedContinue(Box<dyn std::error::Error + Send + Sync + 'static>),
@@ -27,6 +40,13 @@ pub enum HookResult {
 impl HookResult {
     pub fn should_abort_operation(&self) -> bool {
         matches!(self, Self::FailedAbort(_))
+    }
+
+    pub fn directive(&self) -> Option<&HookDirective> {
+        match self {
+            Self::SuccessWithDirective(directive) => Some(directive),
+            _ => None,
+        }
     }
 }
 

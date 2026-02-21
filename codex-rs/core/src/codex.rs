@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -41,6 +43,7 @@ use crate::turn_metadata::TurnMetadataState;
 use crate::util::error_or_panic;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_hooks::HookDirective;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
@@ -90,6 +93,8 @@ use rmcp::model::ReadResourceResult;
 use rmcp::model::RequestId;
 use serde_json;
 use serde_json::Value;
+use tokio::process::Child;
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
@@ -422,6 +427,7 @@ impl Codex {
             auth_manager.clone(),
             models_manager.clone(),
             exec_policy,
+            tx_sub.clone(),
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
@@ -516,6 +522,7 @@ impl Codex {
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
 pub(crate) struct Session {
     pub(crate) conversation_id: ThreadId,
+    tx_sub: Sender<Submission>,
     tx_event: Sender<Event>,
     agent_status: watch::Sender<AgentStatus>,
     state: Mutex<SessionState>,
@@ -524,9 +531,16 @@ pub(crate) struct Session {
     features: Features,
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pending_auto_next_turn_inputs: Mutex<Vec<String>>,
+    notify_next_turn_service: Mutex<Option<NotifyNextTurnService>>,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
+}
+
+struct NotifyNextTurnService {
+    url: String,
+    child: Child,
 }
 /// The context needed for a single turn of the thread.
 #[derive(Debug)]
@@ -889,6 +903,69 @@ impl Session {
         state.session_configuration.codex_home().clone()
     }
 
+    async fn maybe_spawn_notify_next_turn_service(
+        config: &Config,
+        conversation_id: ThreadId,
+        session_source: &SessionSource,
+    ) -> Option<NotifyNextTurnService> {
+        if matches!(session_source, SessionSource::SubAgent(_)) {
+            return None;
+        }
+        if config.notify_next_turn.is_none() {
+            return None;
+        }
+        let Some(argv) = config.notify_next_turn_service.as_ref() else {
+            return None;
+        };
+        let (program, args) = match argv.split_first() {
+            Some((program, args)) if !program.trim().is_empty() => (program, args),
+            _ => return None,
+        };
+
+        let port = match Self::pick_loopback_port() {
+            Ok(port) => port,
+            Err(err) => {
+                warn!("failed to allocate port for notify_next_turn service: {err}");
+                return None;
+            }
+        };
+        let host = "127.0.0.1";
+        let url = format!("http://{host}:{port}/decide");
+
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("AUTO_NEXT_HOST", host)
+            .env("AUTO_NEXT_PORT", port.to_string())
+            .env("AUTO_NEXT_SERVICE_URL", url.clone())
+            .env("AUTO_NEXT_SESSION_ID", conversation_id.to_string());
+
+        match command.spawn() {
+            Ok(child) => {
+                info!(
+                    thread_id = %conversation_id,
+                    service_url = %url,
+                    "started notify_next_turn sidecar service"
+                );
+                Some(NotifyNextTurnService { url, child })
+            }
+            Err(err) => {
+                warn!("failed to start notify_next_turn service: {err}");
+                None
+            }
+        }
+    }
+
+    fn pick_loopback_port() -> std::io::Result<u16> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
+    }
+
     fn start_file_watcher_listener(self: &Arc<Self>) {
         let mut rx = self.services.file_watcher.subscribe();
         let weak_sess = Arc::downgrade(self);
@@ -994,6 +1071,7 @@ impl Session {
         auth_manager: Arc<AuthManager>,
         models_manager: Arc<ModelsManager>,
         exec_policy: ExecPolicyManager,
+        tx_sub: Sender<Submission>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         initial_history: InitialHistory,
@@ -1281,6 +1359,16 @@ impl Session {
             .initialize_for_session(&conversation_id.to_string())
             .await;
 
+        let notify_next_turn_service = Self::maybe_spawn_notify_next_turn_service(
+            config.as_ref(),
+            conversation_id,
+            &session_configuration.session_source,
+        )
+        .await;
+        let notify_next_turn_service_url = notify_next_turn_service
+            .as_ref()
+            .map(|service| service.url.clone());
+
         let services = SessionServices {
             // Initialize the MCP connection manager with an uninitialized
             // instance. It will be replaced with one created via
@@ -1303,6 +1391,8 @@ impl Session {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                legacy_notify_next_turn_argv: config.notify_next_turn.clone(),
+                legacy_notify_next_turn_service_url: notify_next_turn_service_url,
             }),
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
@@ -1350,12 +1440,15 @@ impl Session {
 
         let sess = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event: tx_event.clone(),
             agent_status,
             state: Mutex::new(state),
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            pending_auto_next_turn_inputs: Mutex::new(Vec::new()),
+            notify_next_turn_service: Mutex::new(notify_next_turn_service),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -2958,6 +3051,101 @@ impl Session {
         }
     }
 
+    pub(crate) async fn enqueue_auto_next_turn_input(&self, input: String) {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut pending = self.pending_auto_next_turn_inputs.lock().await;
+        pending.push(trimmed.to_string());
+    }
+
+    pub(crate) async fn drain_auto_next_turn_inputs(&self) -> Vec<String> {
+        let mut pending = self.pending_auto_next_turn_inputs.lock().await;
+        std::mem::take(&mut *pending)
+    }
+
+    pub(crate) async fn submit_auto_next_user_turn(&self, text: String) {
+        let input = text.trim();
+        if input.is_empty() {
+            return;
+        }
+        let sub = Submission {
+            id: self.next_internal_sub_id(),
+            op: Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: input.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+            },
+        };
+        if self.tx_sub.send(sub).await.is_err() {
+            warn!("failed to enqueue auto next turn input: submission loop is not available");
+        }
+    }
+
+    pub(crate) async fn shutdown_notify_next_turn_service(&self) {
+        let mut service = {
+            let mut guard = self.notify_next_turn_service.lock().await;
+            guard.take()
+        };
+        let Some(service) = service.as_mut() else {
+            return;
+        };
+
+        match service.child.try_wait() {
+            Ok(Some(status)) => {
+                debug!(
+                    service_url = %service.url,
+                    ?status,
+                    "notify_next_turn sidecar already exited"
+                );
+                return;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    service_url = %service.url,
+                    error = %err,
+                    "failed to query notify_next_turn sidecar status"
+                );
+            }
+        }
+
+        if let Err(err) = service.child.start_kill() {
+            warn!(
+                service_url = %service.url,
+                error = %err,
+                "failed to terminate notify_next_turn sidecar"
+            );
+            return;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(2), service.child.wait()).await {
+            Ok(Ok(status)) => {
+                info!(
+                    service_url = %service.url,
+                    ?status,
+                    "notify_next_turn sidecar stopped"
+                );
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    service_url = %service.url,
+                    error = %err,
+                    "failed waiting for notify_next_turn sidecar exit"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    service_url = %service.url,
+                    "timed out waiting for notify_next_turn sidecar exit"
+                );
+            }
+        }
+    }
+
     pub async fn list_resources(
         &self,
         server: &str,
@@ -4017,6 +4205,7 @@ mod handlers {
             .unified_exec_manager
             .terminate_all_processes()
             .await;
+        sess.shutdown_notify_next_turn_service().await;
         sess.services.zsh_exec_bridge.shutdown().await;
         info!("Shutting down Codex instance");
         let history = sess.clone_history().await;
@@ -4536,28 +4725,49 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
-                    let hook_outcomes = sess
-                        .hooks()
-                        .dispatch(HookPayload {
-                            session_id: sess.conversation_id,
-                            cwd: turn_context.cwd.clone(),
-                            triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
-                                event: HookEventAfterAgent {
-                                    thread_id: sess.conversation_id,
-                                    turn_id: turn_context.sub_id.clone(),
-                                    input_messages: sampling_request_input_messages,
-                                    last_assistant_message: last_agent_message.clone(),
-                                },
+                    let hook_payload = HookPayload {
+                        session_id: sess.conversation_id,
+                        cwd: turn_context.cwd.clone(),
+                        triggered_at: chrono::Utc::now(),
+                        hook_event: HookEvent::AfterAgent {
+                            event: HookEventAfterAgent {
+                                thread_id: sess.conversation_id,
+                                turn_id: turn_context.sub_id.clone(),
+                                input_messages: sampling_request_input_messages,
+                                last_assistant_message: last_agent_message.clone(),
                             },
-                        })
-                        .await;
+                        },
+                    };
+                    let hook_outcomes = sess.hooks().dispatch(hook_payload).await;
 
                     let mut abort_message = None;
+                    let mut auto_next_turn_input: Option<String> = None;
+                    let mut auto_next_turn_reason: Option<String> = None;
+                    let mut auto_next_turn_notices: Vec<String> = Vec::new();
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
                         match hook_outcome.result {
                             HookResult::Success => {}
+                            HookResult::SuccessWithDirective(HookDirective::QueueNextTurn {
+                                input,
+                                reason,
+                            }) => {
+                                if auto_next_turn_input.is_none() {
+                                    auto_next_turn_input = Some(input);
+                                    auto_next_turn_reason = reason;
+                                } else {
+                                    warn!(
+                                        turn_id = %turn_context.sub_id,
+                                        hook_name = %hook_name,
+                                        "ignoring additional queue_next_turn directive from after_agent hook"
+                                    );
+                                }
+                            }
+                            HookResult::SuccessWithDirective(HookDirective::Notify {
+                                message,
+                            }) => {
+                                auto_next_turn_notices.push(message);
+                            }
                             HookResult::FailedContinue(error) => {
                                 warn!(
                                     turn_id = %turn_context.sub_id,
@@ -4592,6 +4802,25 @@ pub(crate) async fn run_turn(
                         )
                         .await;
                         return None;
+                    }
+                    for message in auto_next_turn_notices {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Warning(WarningEvent { message }),
+                        )
+                        .await;
+                    }
+                    if let Some(reason) = auto_next_turn_reason {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::Warning(WarningEvent {
+                                message: format!("Auto next-turn decision: {reason}"),
+                            }),
+                        )
+                        .await;
+                    }
+                    if let Some(input) = auto_next_turn_input {
+                        sess.enqueue_auto_next_turn_input(input).await;
                     }
                     break;
                 }
@@ -7297,6 +7526,7 @@ mod tests {
             persist_extended_history: false,
         };
 
+        let (tx_sub, _rx_sub) = async_channel::unbounded();
         let (tx_event, _rx_event) = async_channel::unbounded();
         let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
         let result = Session::new(
@@ -7305,6 +7535,7 @@ mod tests {
             auth_manager,
             models_manager,
             ExecPolicyManager::default(),
+            tx_sub,
             tx_event,
             agent_status_tx,
             InitialHistory::New,
@@ -7325,6 +7556,7 @@ mod tests {
 
     // todo: use online model info
     pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+        let (tx_sub, _rx_sub) = async_channel::unbounded();
         let (tx_event, _rx_event) = async_channel::unbounded();
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
@@ -7410,6 +7642,8 @@ mod tests {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                legacy_notify_next_turn_argv: config.notify_next_turn.clone(),
+                legacy_notify_next_turn_service_url: None,
             }),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
@@ -7460,12 +7694,15 @@ mod tests {
 
         let session = Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            pending_auto_next_turn_inputs: Mutex::new(Vec::new()),
+            notify_next_turn_service: Mutex::new(None),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
@@ -7481,6 +7718,7 @@ mod tests {
         Arc<TurnContext>,
         async_channel::Receiver<Event>,
     ) {
+        let (tx_sub, _rx_sub) = async_channel::unbounded();
         let (tx_event, rx_event) = async_channel::unbounded();
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = build_test_config(codex_home.path()).await;
@@ -7566,6 +7804,8 @@ mod tests {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                legacy_notify_next_turn_argv: config.notify_next_turn.clone(),
+                legacy_notify_next_turn_service_url: None,
             }),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
@@ -7616,12 +7856,15 @@ mod tests {
 
         let session = Arc::new(Session {
             conversation_id,
+            tx_sub,
             tx_event,
             agent_status: agent_status_tx,
             state: Mutex::new(state),
             features: config.features.clone(),
             pending_mcp_server_refresh_config: Mutex::new(None),
             active_turn: Mutex::new(None),
+            pending_auto_next_turn_inputs: Mutex::new(Vec::new()),
+            notify_next_turn_service: Mutex::new(None),
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),

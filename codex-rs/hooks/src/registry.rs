@@ -8,6 +8,8 @@ use crate::types::HookResponse;
 #[derive(Default, Clone)]
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
+    pub legacy_notify_next_turn_argv: Option<Vec<String>>,
+    pub legacy_notify_next_turn_service_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -26,12 +28,21 @@ impl Default for Hooks {
 // executed after specific events in the Codex lifecycle.
 impl Hooks {
     pub fn new(config: HooksConfig) -> Self {
-        let after_agent = config
+        let mut after_agent = config
             .legacy_notify_argv
             .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
             .map(crate::notify_hook)
             .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(argv) = config
+            .legacy_notify_next_turn_argv
+            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
+        {
+            after_agent.push(crate::notify_next_turn_hook(
+                argv,
+                config.legacy_notify_next_turn_service_url.clone(),
+            ));
+        }
         Self {
             after_agent,
             after_tool_use: Vec::new(),
@@ -229,6 +240,8 @@ mod tests {
         assert!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec![]),
+                legacy_notify_next_turn_argv: None,
+                legacy_notify_next_turn_service_url: None,
             })
             .after_agent
             .is_empty()
@@ -236,6 +249,8 @@ mod tests {
         assert!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec!["".to_string()]),
+                legacy_notify_next_turn_argv: None,
+                legacy_notify_next_turn_service_url: None,
             })
             .after_agent
             .is_empty()
@@ -243,6 +258,8 @@ mod tests {
         assert_eq!(
             Hooks::new(HooksConfig {
                 legacy_notify_argv: Some(vec!["notify-send".to_string()]),
+                legacy_notify_next_turn_argv: None,
+                legacy_notify_next_turn_service_url: None,
             })
             .after_agent
             .len(),
