@@ -16,6 +16,19 @@ import urllib.request
 from pathlib import Path
 
 
+def _env_bool(*keys: str, default: bool = False) -> bool:
+    for key in keys:
+        raw = os.getenv(key)
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
 def _resolve_output_path(payload: dict) -> Path:
     output_name = os.getenv("AUTO_NEXT_OUTPUT_FILE", "out.1").strip() or "out.1"
     cwd = payload.get("cwd")
@@ -63,8 +76,15 @@ def main() -> int:
     except Exception:
         return 0
 
+    local_log_enabled = _env_bool(
+        "next_turn_local_log",
+        "NEXT_TURN_LOCAL_LOG",
+        "AUTO_NEXT_LOCAL_LOG",
+        default=False,
+    )
+
     out_path = None
-    if isinstance(payload, dict):
+    if isinstance(payload, dict) and local_log_enabled:
         out_path = _write_turn_output(payload)
 
     service_url = os.getenv("AUTO_NEXT_SERVICE_URL", "http://127.0.0.1:8765/decide")

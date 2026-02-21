@@ -1,66 +1,78 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex Fork: Auto Next-Turn Closed Loop
 
----
+This repository is a custom Codex fork focused on one enhancement:
 
-## Quickstart
+- after a turn completes, run an intelligent next-step decision;
+- if the result is safely continuable, inject the next turn automatically;
+- extend execution from single-turn completion to a longer closed loop.
 
-### Installing and running Codex CLI
+## What Changed
 
-Install globally with your preferred package manager:
+- Added `notify_next_turn` hook directive parsing and next-turn queueing in core.
+- Added per-session sidecar startup via `notify_next_turn_service`.
+- Added in-session warning visibility for decision reasoning in TUI/CLI.
+- Added local scripts:
+  - `scripts/autonext_hook.py`
+  - `scripts/autonext_service.py`
+- Added optional local turn logging (`out.1`) controlled by env switch, off by default.
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+## Runtime Flow
+
+1. Codex finishes one turn.
+2. `notify_next_turn` hook is triggered.
+3. Hook sends payload to local sidecar decision service.
+4. Sidecar calls configured model/provider and returns JSON decision.
+5. If `need_next_turn=true`, Codex injects a new user turn in the same session.
+
+## Build And Run
+
+```bash
+cd codex-rs
+cargo build -p codex-cli --release
+./target/release/codex
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+## Config
+
+Set in `~/.codex/config.toml`:
+
+```toml
+notify_next_turn = ["python3", "/ABSOLUTE/PATH/TO/codex/scripts/autonext_hook.py"]
+notify_next_turn_service = ["python3", "/ABSOLUTE/PATH/TO/codex/scripts/autonext_service.py"]
 ```
 
-Then simply run `codex` to get started.
+## Local Logging (out.1)
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+`out.1` writing is disabled by default.
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+Enable it only when needed:
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```bash
+export next_turn_local_log=1
+# or
+export NEXT_TURN_LOCAL_LOG=1
+```
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Optional output filename/path:
 
-</details>
+```bash
+export AUTO_NEXT_OUTPUT_FILE=out.1
+```
 
-### Using Codex with your ChatGPT plan
+When local logging is enabled, hook writes:
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Team, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+- last assistant output
+- decision trace line (`[auto-next] ...`)
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+## Decision Model Source
+
+By default, decision service reads the same provider/model settings from your Codex config and auth.
+You can still override provider/model by env vars (see `docs/auto_next_turn.md`).
 
 ## Docs
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-## Improvements In This Fork
-
-- After a single turn completes, Codex can run an intelligent continuation decision (`notify_next_turn` hook + local decision service).
-- When the turn is judged as safely continuable, Codex automatically injects the next-turn input and keeps working in the same session.
-- This extends closed-loop execution length from one-turn completion to multi-step auto-continuation when a simple and low-risk next step is available.
+- `docs/auto_next_turn.md`
+- `docs/install.md`
+- `docs/contributing.md`
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).

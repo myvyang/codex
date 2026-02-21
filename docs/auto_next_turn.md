@@ -56,7 +56,8 @@ If no key can be resolved, service returns `need_next_turn=false`.
 
 - `AUTO_NEXT_SERVICE_URL` (hook-side, default `http://127.0.0.1:8765/decide`)
 - `AUTO_NEXT_HOOK_TIMEOUT_SEC` (hook-side timeout, default `20.0`)
-- `AUTO_NEXT_OUTPUT_FILE` (hook-side completed-output file name/path, default `out.1`)
+- `next_turn_local_log` / `NEXT_TURN_LOCAL_LOG` (hook-side local logging switch; set `1` to write output/decision trace)
+- `AUTO_NEXT_OUTPUT_FILE` (hook-side completed-output file name/path, default `out.1`; only used when local logging is enabled)
 - `AUTO_NEXT_DECIDER` (`codex_config` default, `openai_chat` optional fallback)
 - `AUTO_NEXT_HOST` (service bind host, default `127.0.0.1`)
 - `AUTO_NEXT_PORT` (service bind port, default `8765`)
